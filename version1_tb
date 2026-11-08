@@ -1,0 +1,136 @@
+`timescale 1ns/1ps
+
+module tb_token_manager();
+
+    reg        clk;
+    reg        rst_n;
+    reg        gen_normal_tok;
+    reg        gen_prior_tok;
+    reg        next_token;
+    reg        no_show;
+    reg        recall_req;
+
+    wire [7:0] current_token;
+    wire       current_is_priority;
+    wire       valid_current;
+    wire [7:0] last_generated;
+    wire       norm_queue_full;
+    wire       prio_queue_full;
+
+    // Instantiate Device Under Test (DUT)
+    token_manager #(
+        .TOKEN_WIDTH(8),
+        .QUEUE_DEPTH(16)
+    ) dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .gen_normal_tok(gen_normal_tok),
+        .gen_prior_tok(gen_prior_tok),
+        .next_token(next_token),
+        .no_show(no_show),
+        .recall_req(recall_req),
+        .current_token(current_token),
+        .current_is_priority(current_is_priority),
+        .valid_current(valid_current),
+        .last_generated(last_generated),
+        .norm_queue_full(norm_queue_full),
+        .prio_queue_full(prio_queue_full)
+    );
+
+    // Clock Generation: 10ns period (100 MHz)
+    always #5 clk = ~clk;
+
+    initial begin
+        // Initialize Signals
+        clk = 0;
+        rst_n = 0;
+        gen_normal_tok = 0;
+        gen_prior_tok = 0;
+        next_token = 0;
+        no_show = 0;
+        recall_req = 0;
+
+        // Apply Reset
+        #20 rst_n = 1;
+        #10;
+
+        // 1. Generate 3 Normal Tokens (#1, #2, #3)
+        $display("\n--- Generating 3 Normal Tokens ---");
+        generate_normal();
+        generate_normal();
+        generate_normal();
+
+        // 2. Generate a Priority Token (Gets #4)
+        $display("\n--- Generating Priority Token ---");
+        generate_priority();
+
+        // 3. Call Next (Priority queue is serviced first, expects #4 [Priority])
+        $display("\n--- Calling Next Token (Expect #4, Priority: 1) ---");
+        call_next();
+
+        // 4. Call Next (Normal queue starts, expects #1 [Normal])
+        $display("\n--- Calling Next Token (Expect #1, Priority: 0) ---");
+        call_next();
+
+        // 5. Mark Token #1 as No-Show
+        $display("\n--- Marking Current Token (#1) as No-Show ---");
+        trigger_no_show();
+
+        // 6. Call Next (Skips missing token, serves #2 [Normal])
+        $display("\n--- Calling Next Token (Expect #2, Priority: 0) ---");
+        call_next();
+
+        // 7. Customer for #1 returns, trigger recall request
+        $display("\n--- Customer #1 Returns: Triggering Recall Request ---");
+        trigger_recall();
+
+        // 8. Call Next (Recall buffer takes absolute precedence, expects #1)
+        $display("\n--- Calling Next Token (Expect Recalled #1) ---");
+        call_next();
+
+        // 9. Call Next (Resumes normal queue, expects #3)
+        $display("\n--- Calling Next Token (Expect #3, Priority: 0) ---");
+        call_next();
+
+        #50;
+        $finish;
+    end
+
+    // Task definitions for clean testbench stimulus
+    task generate_normal();
+        begin
+            gen_normal_tok = 1; #10;
+            gen_normal_tok = 0; #10;
+        end
+    endtask
+
+    task generate_priority();
+        begin
+            gen_prior_tok = 1; #10;
+            gen_prior_tok = 0; #10;
+        end
+    endtask
+
+    task call_next();
+        begin
+            next_token = 1; #10;
+            next_token = 0; #10;
+            $display(">> Serving Token: %0d | Is Priority: %b | Valid: %b", current_token, current_is_priority, valid_current);
+        end
+    endtask
+
+    task trigger_no_show(); // Fixed capitalization here
+        begin
+            no_show = 1; #10;
+            no_show = 0; #10;
+        end
+    endtask
+
+    task trigger_recall();
+        begin
+            recall_req = 1; #10;
+            recall_req = 0; #10;
+        end
+    endtask
+
+endmodule
