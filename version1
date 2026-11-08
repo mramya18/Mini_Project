@@ -1,0 +1,135 @@
+module token_manager #(
+    parameter TOKEN_WIDTH = 8,
+    parameter QUEUE_DEPTH = 16
+)(
+    input  wire                   clk,
+    input  wire                   rst_n,           // Active low reset
+    
+    // Inputs / Control Buttons
+    input  wire                   gen_normal_tok,  // Request normal token
+    input  wire                   gen_prior_tok,   // Request priority token
+    input  wire                   next_token,      // Call next token to serve
+    input  wire                   no_show,         // Mark current serving token as No-Show
+    input  wire                   recall_req,      // Re-insert last No-Show token back to serve
+    
+    // Outputs to Display / Indicators
+    output reg  [TOKEN_WIDTH-1:0] current_token,   // Token currently being served
+    output reg                    current_is_priority, // High if current token is a priority token
+    output reg                    valid_current,   // High when current_token is valid
+    output wire [TOKEN_WIDTH-1:0] last_generated,  // Last generated token number (shared)
+    output wire                   norm_queue_full,
+    output wire                   prio_queue_full
+);
+
+    // Single Shared Token Counter
+    reg [TOKEN_WIDTH-1:0] token_counter;
+
+    // Normal Queue Signals (Stores Token IDs)
+    reg [TOKEN_WIDTH-1:0] norm_queue [0:QUEUE_DEPTH-1];
+    reg [$clog2(QUEUE_DEPTH):0] norm_wptr, norm_rptr, norm_count;
+
+    // Priority Queue Signals (Stores Token IDs)
+    reg [TOKEN_WIDTH-1:0] prio_queue [0:QUEUE_DEPTH-1];
+    reg [$clog2(QUEUE_DEPTH):0] prio_wptr, prio_rptr, prio_count;
+
+    // Recall Buffer Registers (Single Slot for No-Show & Recall)
+    reg [TOKEN_WIDTH-1:0] recall_buffer;
+    reg                   recall_is_prio;
+    reg                   recall_valid;
+
+    assign last_generated  = token_counter;
+    assign norm_queue_full = (norm_count == QUEUE_DEPTH);
+    assign prio_queue_full = (prio_count == QUEUE_DEPTH);
+
+    // -------------------------------------------------------------
+    // Token Generation Logic (Shared Counter)
+    // -------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            token_counter <= 8'h01; // Starts at 1
+            norm_wptr     <= 0;
+            norm_count    <= 0;
+            prio_wptr     <= 0;
+            prio_count    <= 0;
+        end else begin
+            // Normal Token Generation
+            if (gen_normal_tok && !norm_queue_full) begin
+                token_counter         <= token_counter + 1'b1;
+                norm_queue[norm_wptr] <= token_counter;
+                norm_wptr             <= (norm_wptr + 1) % QUEUE_DEPTH;
+                norm_count            <= norm_count + 1'b1;
+            end
+
+            // Priority Token Generation (Shares the exact same counter sequence)
+            if (gen_prior_tok && !prio_queue_full) begin
+                token_counter         <= token_counter + 1'b1;
+                prio_queue[prio_wptr] <= token_counter;
+                prio_wptr             <= (prio_wptr + 1) % QUEUE_DEPTH;
+                prio_count            <= prio_count + 1'b1;
+            end
+
+            // Adjust queue counts when a token is served (excluding active recall hits)
+            if (next_token) begin
+                if (recall_valid) begin
+                    // Recall token served from buffer, queue counts remain unaffected
+                end else if (prio_count > 0) begin
+                    prio_count <= prio_count - 1'b1;
+                end else if (norm_count > 0) begin
+                    norm_count <= norm_count - 1'b1;
+                end
+            end
+        end
+    end
+
+    // -------------------------------------------------------------
+    // Token Serving, Recall Buffer & No-Show Logic
+    // -------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            current_token       <= {TOKEN_WIDTH{1'b0}};
+            current_is_priority <= 1'b0;
+            valid_current       <= 1'b0;
+            recall_buffer       <= {TOKEN_WIDTH{1'b0}};
+            recall_is_prio      <= 1'b0;
+            recall_valid        <= 1'b0;
+            norm_rptr           <= 0;
+            prio_rptr           <= 0;
+        end else begin
+            // 1. Handle No-Show Event: Capture current serving token into recall buffer
+            if (no_show && valid_current) begin
+                recall_buffer  <= current_token;
+                recall_is_prio <= current_is_priority;
+                recall_valid   <= 1'b1;
+                valid_current  <= 1'b0;
+            end
+
+            // 2. Handle Recall Request: Mark buffered no-show token ready for re-serving
+            if (recall_req && !recall_valid && (recall_buffer != 0)) begin
+                recall_valid <= 1'b1;
+            end
+
+            // 3. Serve Next Token (Hierarchy: Recall Buffer -> Priority Queue -> Normal Queue)
+            if (next_token) begin
+                if (recall_valid) begin
+                    current_token       <= recall_buffer;
+                    current_is_priority <= recall_is_prio;
+                    valid_current       <= 1'b1;
+                    recall_valid        <= 1'b0; // Clear recall status once served
+                end else if (prio_count > 0) begin
+                    current_token       <= prio_queue[prio_rptr];
+                    current_is_priority <= 1'b1; // Flagged as Priority
+                    valid_current       <= 1'b1;
+                    prio_rptr           <= (prio_rptr + 1) % QUEUE_DEPTH;
+                end else if (norm_count > 0) begin
+                    current_token       <= norm_queue[norm_rptr];
+                    current_is_priority <= 1'b0; // Flagged as Normal
+                    valid_current       <= 1'b1;
+                    norm_rptr           <= (norm_rptr + 1) % QUEUE_DEPTH;
+                end else begin
+                    valid_current       <= 1'b0; // No tokens available anywhere
+                end
+            end
+        end
+    end
+
+endmodule
